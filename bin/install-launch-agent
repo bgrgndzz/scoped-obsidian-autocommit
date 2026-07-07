@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+install-launch-agent --label LABEL --config FILE [options]
+
+Install a macOS LaunchAgent that runs scoped-obsidian-autocommit on an interval.
+
+Options:
+  --label LABEL        LaunchAgent label, e.g. com.bourne.ai-research-autocommit
+  --config FILE        Config file passed to scoped-obsidian-autocommit
+  --interval SECONDS   StartInterval in seconds (default: 900)
+  --tool PATH          Path to scoped-obsidian-autocommit executable
+  --log PATH           Log path (default: /tmp/<label>.log)
+  --dry-run            Print plist instead of writing/loading it
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+LABEL=""
+CONFIG=""
+INTERVAL="900"
+TOOL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scoped-obsidian-autocommit"
+LOG=""
+DRY_RUN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --label)
+      LABEL="$2"
+      shift 2
+      ;;
+    --config)
+      CONFIG="$2"
+      shift 2
+      ;;
+    --interval)
+      INTERVAL="$2"
+      shift 2
+      ;;
+    --tool)
+      TOOL="$2"
+      shift 2
+      ;;
+    --log)
+      LOG="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$LABEL" ]] || die "missing --label"
+[[ -n "$CONFIG" ]] || die "missing --config"
+[[ -x "$TOOL" ]] || die "tool is not executable: $TOOL"
+[[ -f "$CONFIG" ]] || die "config file not found: $CONFIG"
+[[ "$INTERVAL" =~ ^[0-9]+$ ]] || die "interval must be seconds"
+
+LOG="${LOG:-/tmp/${LABEL}.log}"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+
+plist_content="$(cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${TOOL}</string>
+    <string>--config</string>
+    <string>${CONFIG}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>${INTERVAL}</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG}</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG}</string>
+</dict>
+</plist>
+PLIST
+)"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  printf '%s\n' "$plist_content"
+  exit 0
+fi
+
+mkdir -p "$HOME/Library/LaunchAgents"
+printf '%s\n' "$plist_content" > "$PLIST"
+plutil -lint "$PLIST"
+
+launchctl unload "$PLIST" >/dev/null 2>&1 || true
+launchctl load "$PLIST"
+printf 'installed %s\n' "$PLIST"

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bourne.ai-research-autocommit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/Developer/scoped-obsidian-autocommit/bin/scoped-obsidian-autocommit</string>
+    <string>--config</string>
+    <string>/Users/you/.config/scoped-obsidian-autocommit/ai-research.env</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/com.bourne.ai-research-autocommit.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.bourne.ai-research-autocommit.log</string>
+</dict>
+</plist>

@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+SOURCE_PATH="${SOURCE_PATH:-}"
+MIRROR_REPO="${MIRROR_REPO:-}"
+REMOTE_URL="${REMOTE_URL:-}"
+BRANCH="${BRANCH:-main}"
+MESSAGE_PREFIX="${MESSAGE_PREFIX:-Auto-commit}"
+PUSH="${PUSH:-1}"
+DRY_RUN="${DRY_RUN:-0}"
+ALLOW_OBSIDIAN_ROOT="${ALLOW_OBSIDIAN_ROOT:-0}"
+EXCLUDE_PATTERNS=(
+  ".git/"
+  ".obsidian/"
+  ".trash/"
+  ".DS_Store"
+  "Thumbs.db"
+)
+
+usage() {
+  cat <<'USAGE'
+scoped-obsidian-autocommit
+
+Mirror one Obsidian subfolder into a separate Git repo, auto-commit changes,
+and optionally push to a configured remote.
+
+Usage:
+  scoped-obsidian-autocommit --source PATH --repo PATH --remote URL [options]
+  scoped-obsidian-autocommit --config FILE [options]
+
+Options:
+  --config FILE                 Load shell-style config before parsing later args
+  --source PATH                 Obsidian subtree to publish
+  --repo PATH                   Local mirror Git repo
+  --remote URL                  GitHub remote for the mirror repo
+  --branch NAME                 Branch to commit to (default: main)
+  --message-prefix TEXT         Commit message prefix (default: Auto-commit)
+  --exclude PATTERN             Additional rsync exclude pattern; repeatable
+  --dry-run                     Show what would sync without changing files
+  --no-push                     Commit locally but do not push
+  --allow-obsidian-root         Allow source paths containing a .obsidian folder
+  -h, --help                    Show this help
+
+Config files are trusted shell snippets. Supported variables:
+  SOURCE_PATH, MIRROR_REPO, REMOTE_URL, BRANCH, MESSAGE_PREFIX, PUSH,
+  DRY_RUN, ALLOW_OBSIDIAN_ROOT, EXCLUDE_PATTERNS
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+realpath_portable() {
+  local target="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$target"
+  else
+    if [[ -d "$target" ]]; then
+      (cd "$target" && pwd -P)
+    else
+      local dir
+      local base
+      dir="$(dirname "$target")"
+      base="$(basename "$target")"
+      printf '%s/%s\n' "$(cd "$dir" && pwd -P)" "$base"
+    fi
+  fi
+}
+
+load_config() {
+  local file="$1"
+  [[ -f "$file" ]] || die "config file not found: $file"
+  # shellcheck source=/dev/null
+  source "$file"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      [[ $# -ge 2 ]] || die "--config needs a file"
+      load_config "$2"
+      shift 2
+      ;;
+    --source)
+      [[ $# -ge 2 ]] || die "--source needs a path"
+      SOURCE_PATH="$2"
+      shift 2
+      ;;
+    --repo)
+      [[ $# -ge 2 ]] || die "--repo needs a path"
+      MIRROR_REPO="$2"
+      shift 2
+      ;;
+    --remote)
+      [[ $# -ge 2 ]] || die "--remote needs a URL"
+      REMOTE_URL="$2"
+      shift 2
+      ;;
+    --branch)
+      [[ $# -ge 2 ]] || die "--branch needs a name"
+      BRANCH="$2"
+      shift 2
+      ;;
+    --message-prefix)
+      [[ $# -ge 2 ]] || die "--message-prefix needs text"
+      MESSAGE_PREFIX="$2"
+      shift 2
+      ;;
+    --exclude)
+      [[ $# -ge 2 ]] || die "--exclude needs a pattern"
+      EXCLUDE_PATTERNS+=("$2")
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --no-push)
+      PUSH=0
+      shift
+      ;;
+    --allow-obsidian-root)
+      ALLOW_OBSIDIAN_ROOT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$SOURCE_PATH" ]] || die "missing --source or SOURCE_PATH"
+[[ -n "$MIRROR_REPO" ]] || die "missing --repo or MIRROR_REPO"
+
+[[ -d "$SOURCE_PATH" ]] || die "source path is not a directory: $SOURCE_PATH"
+mkdir -p "$MIRROR_REPO"
+
+SOURCE_PATH="$(realpath_portable "$SOURCE_PATH")"
+MIRROR_REPO="$(realpath_portable "$MIRROR_REPO")"
+
+[[ "$SOURCE_PATH" != "/" ]] || die "refusing to publish filesystem root"
+[[ "$SOURCE_PATH" != "$HOME" ]] || die "refusing to publish home directory"
+[[ "$SOURCE_PATH" != "$MIRROR_REPO" ]] || die "source and mirror repo must differ"
+
+case "$MIRROR_REPO/" in
+  "$SOURCE_PATH"/*) die "mirror repo must not be inside source path" ;;
+esac
+case "$SOURCE_PATH/" in
+  "$MIRROR_REPO"/*) die "source path must not be inside mirror repo" ;;
+esac
+
+if [[ -d "$SOURCE_PATH/.obsidian" && "$ALLOW_OBSIDIAN_ROOT" != "1" ]]; then
+  die "source contains .obsidian; pick a subfolder or pass --allow-obsidian-root"
+fi
+
+LOCK_ID="$(printf '%s\n%s\n' "$SOURCE_PATH" "$MIRROR_REPO" | cksum | awk '{print $1}')"
+LOCK_DIR="${TMPDIR:-/tmp}/scoped-obsidian-autocommit.${LOCK_ID}.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  die "another scoped autocommit is already running for this source/repo"
+fi
+trap 'rm -rf "$LOCK_DIR"' EXIT
+
+rsync_args=(-a --delete)
+for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+  rsync_args+=(--exclude "$pattern")
+done
+
+printf 'source: %s\n' "$SOURCE_PATH"
+printf 'mirror: %s\n' "$MIRROR_REPO"
+printf 'branch: %s\n' "$BRANCH"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  printf 'mode: dry-run\n'
+  rsync -ani --delete "${rsync_args[@]:2}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+  exit 0
+fi
+
+if [[ ! -d "$MIRROR_REPO/.git" ]]; then
+  git -C "$MIRROR_REPO" init -b "$BRANCH"
+fi
+
+current_branch="$(git -C "$MIRROR_REPO" branch --show-current || true)"
+if [[ "$current_branch" != "$BRANCH" ]]; then
+  git -C "$MIRROR_REPO" checkout -B "$BRANCH"
+fi
+
+if [[ -n "$REMOTE_URL" ]]; then
+  if git -C "$MIRROR_REPO" remote get-url origin >/dev/null 2>&1; then
+    git -C "$MIRROR_REPO" remote set-url origin "$REMOTE_URL"
+  else
+    git -C "$MIRROR_REPO" remote add origin "$REMOTE_URL"
+  fi
+fi
+
+rsync "${rsync_args[@]}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+
+if [[ -z "$(git -C "$MIRROR_REPO" status --porcelain)" ]]; then
+  printf 'no changes\n'
+  exit 0
+fi
+
+git -C "$MIRROR_REPO" add -A
+git -C "$MIRROR_REPO" commit -m "$MESSAGE_PREFIX: $(date '+%Y-%m-%d %H:%M:%S')"
+
+if [[ "$PUSH" == "1" ]]; then
+  [[ -n "$REMOTE_URL" ]] || die "push enabled but no remote configured"
+  git -C "$MIRROR_REPO" push -u origin "$BRANCH"
+fi
