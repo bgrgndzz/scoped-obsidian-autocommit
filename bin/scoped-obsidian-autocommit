@@ -207,11 +207,24 @@ sync_with_git_archive() {
   local git_root
   local source_prefix
   local archive_ref
+  local pathspec
   local pattern
+
+  # LaunchAgents and manual runs can start from a directory that later gets
+  # replaced during mirror cleanup. Keep destructive cleanup rooted somewhere
+  # stable so macOS find never operates from a disappearing cwd.
+  cd /
 
   git_root="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel)" || return 1
   source_prefix="$(git -C "$SOURCE_PATH" rev-parse --show-prefix)" || return 1
   source_prefix="${source_prefix%/}"
+  pathspec="${source_prefix:-.}"
+
+  if [[ -n "$(git -C "$git_root" status --porcelain -- "$pathspec")" ]]; then
+    printf 'git-archive backend cannot mirror uncommitted source changes: %s\n' "$SOURCE_PATH" >&2
+    printf 'commit the source repo first, or use rsync from a process with folder access\n' >&2
+    return 1
+  fi
 
   find "$MIRROR_REPO" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 

@@ -67,6 +67,9 @@ include private paths or remotes.
 Use `auto` when your source folder lives inside an already-autocommitted vault:
 terminal runs still capture live file changes through `rsync`, while launchd can
 fall back to the committed vault tree when macOS denies direct folder access.
+The `git-archive` backend mirrors committed source state only, so it refuses to
+run when the source subtree has uncommitted changes. This avoids publishing a
+stale snapshot over newer live notes.
 
 ## Dry run
 
@@ -132,6 +135,8 @@ launchctl unload ~/Library/LaunchAgents/com.bourne.ai-research-autocommit.plist
 - supports repeatable `--exclude` patterns
 - supports a `git-archive` fallback for macOS LaunchAgents that cannot directly
   read protected folders like `~/Documents`
+- refuses `git-archive` sync when the source subtree is dirty, because Git
+  archives cannot include uncommitted edits
 
 ## Why not just Git in the full vault?
 
