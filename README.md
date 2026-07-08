@@ -51,10 +51,22 @@ REMOTE_URL="git@github.com:your-org/ai-research-zettelkasten.git"
 BRANCH="main"
 MESSAGE_PREFIX="Auto-commit AI research zettelkasten"
 PUSH=1
+SYNC_BACKEND="auto"
 ```
 
 Config files are trusted shell snippets. Keep local configs out of Git if they
 include private paths or remotes.
+
+`SYNC_BACKEND` can be:
+
+- `rsync`: mirror the live source folder directly.
+- `git-archive`: mirror the source folder from its containing Git repo's `HEAD`.
+- `auto`: try `rsync` first, then fall back to `git-archive` if macOS privacy
+  controls block a LaunchAgent from reading `~/Documents`.
+
+Use `auto` when your source folder lives inside an already-autocommitted vault:
+terminal runs still capture live file changes through `rsync`, while launchd can
+fall back to the committed vault tree when macOS denies direct folder access.
 
 ## Dry run
 
@@ -66,8 +78,9 @@ bin/scoped-obsidian-autocommit \
   --dry-run
 ```
 
-The dry run uses `rsync -n`, so it shows what would be mirrored without changing
-the mirror repo.
+The default dry run uses `rsync -n`, so it shows what would be mirrored without
+changing the mirror repo. With `--sync-backend git-archive`, dry run lists the
+files that would be exported from the source repo's `HEAD`.
 
 Normal runs still try to push when there are no file changes. This lets the tool
 recover from a previous local commit that did not reach the remote.
@@ -117,6 +130,8 @@ launchctl unload ~/Library/LaunchAgents/com.bourne.ai-research-autocommit.plist
   `--allow-obsidian-root` is passed
 - excludes `.git/`, `.obsidian/`, `.trash/`, `.DS_Store`, and `Thumbs.db`
 - supports repeatable `--exclude` patterns
+- supports a `git-archive` fallback for macOS LaunchAgents that cannot directly
+  read protected folders like `~/Documents`
 
 ## Why not just Git in the full vault?
 

@@ -11,6 +11,7 @@ MESSAGE_PREFIX="${MESSAGE_PREFIX:-Auto-commit}"
 PUSH="${PUSH:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 ALLOW_OBSIDIAN_ROOT="${ALLOW_OBSIDIAN_ROOT:-0}"
+SYNC_BACKEND="${SYNC_BACKEND:-rsync}"
 EXCLUDE_PATTERNS=(
   ".git/"
   ".obsidian/"
@@ -41,11 +42,12 @@ Options:
   --dry-run                     Show what would sync without changing files
   --no-push                     Commit locally but do not push
   --allow-obsidian-root         Allow source paths containing a .obsidian folder
+  --sync-backend NAME           rsync, git-archive, or auto (default: rsync)
   -h, --help                    Show this help
 
 Config files are trusted shell snippets. Supported variables:
   SOURCE_PATH, MIRROR_REPO, REMOTE_URL, BRANCH, MESSAGE_PREFIX, PUSH,
-  DRY_RUN, ALLOW_OBSIDIAN_ROOT, EXCLUDE_PATTERNS
+  DRY_RUN, ALLOW_OBSIDIAN_ROOT, SYNC_BACKEND, EXCLUDE_PATTERNS
 USAGE
 }
 
@@ -142,6 +144,11 @@ while [[ $# -gt 0 ]]; do
       ALLOW_OBSIDIAN_ROOT=1
       shift
       ;;
+    --sync-backend)
+      [[ $# -ge 2 ]] || die "--sync-backend needs a name"
+      SYNC_BACKEND="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -154,6 +161,10 @@ done
 
 [[ -n "$SOURCE_PATH" ]] || die "missing --source or SOURCE_PATH"
 [[ -n "$MIRROR_REPO" ]] || die "missing --repo or MIRROR_REPO"
+case "$SYNC_BACKEND" in
+  rsync|git-archive|auto) ;;
+  *) die "unsupported sync backend: $SYNC_BACKEND" ;;
+esac
 
 [[ -d "$SOURCE_PATH" ]] || die "source path is not a directory: $SOURCE_PATH"
 mkdir -p "$MIRROR_REPO"
@@ -188,13 +199,78 @@ for pattern in "${EXCLUDE_PATTERNS[@]}"; do
   rsync_args+=(--exclude "$pattern")
 done
 
+sync_with_rsync() {
+  rsync "${rsync_args[@]}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+}
+
+sync_with_git_archive() {
+  local git_root
+  local source_prefix
+  local archive_ref
+  local pattern
+
+  git_root="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel)" || return 1
+  source_prefix="$(git -C "$SOURCE_PATH" rev-parse --show-prefix)" || return 1
+  source_prefix="${source_prefix%/}"
+
+  find "$MIRROR_REPO" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+
+  if [[ -n "$source_prefix" ]]; then
+    archive_ref="HEAD:${source_prefix}"
+  else
+    archive_ref="HEAD"
+  fi
+
+  git -C "$git_root" archive "$archive_ref" | tar -x -C "$MIRROR_REPO"
+
+  for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    case "$pattern" in
+      */)
+        find "$MIRROR_REPO" -mindepth 2 -name "${pattern%/}" -type d -prune -exec rm -rf {} +
+        ;;
+      .DS_Store|Thumbs.db)
+        find "$MIRROR_REPO" -name "$pattern" -type f -delete
+        ;;
+    esac
+  done
+}
+
+sync_source() {
+  case "$SYNC_BACKEND" in
+    rsync)
+      sync_with_rsync
+      ;;
+    git-archive)
+      sync_with_git_archive
+      ;;
+    auto)
+      sync_with_rsync || {
+        local status="$?"
+        printf 'rsync failed with status %s; falling back to git archive\n' "$status" >&2
+        sync_with_git_archive
+      }
+      ;;
+  esac
+}
+
 printf 'source: %s\n' "$SOURCE_PATH"
 printf 'mirror: %s\n' "$MIRROR_REPO"
 printf 'branch: %s\n' "$BRANCH"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   printf 'mode: dry-run\n'
-  rsync -ani --delete "${rsync_args[@]:2}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+  if [[ "$SYNC_BACKEND" == "git-archive" ]]; then
+    git_root="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel)"
+    source_prefix="$(git -C "$SOURCE_PATH" rev-parse --show-prefix)"
+    source_prefix="${source_prefix%/}"
+    if [[ -n "$source_prefix" ]]; then
+      git -C "$git_root" archive "HEAD:${source_prefix}" | tar -tf -
+    else
+      git -C "$git_root" archive HEAD | tar -tf -
+    fi
+  else
+    rsync -ani --delete "${rsync_args[@]:2}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+  fi
   exit 0
 fi
 
@@ -215,7 +291,7 @@ if [[ -n "$REMOTE_URL" ]]; then
   fi
 fi
 
-rsync "${rsync_args[@]}" "$SOURCE_PATH/" "$MIRROR_REPO/"
+sync_source
 
 if [[ -z "$(git -C "$MIRROR_REPO" status --porcelain)" ]]; then
   printf 'no changes\n'
