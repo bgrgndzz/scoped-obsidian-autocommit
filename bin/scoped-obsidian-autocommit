@@ -54,6 +54,21 @@ die() {
   exit 1
 }
 
+push_if_enabled() {
+  if [[ "$PUSH" != "1" ]]; then
+    return 0
+  fi
+
+  [[ -n "$REMOTE_URL" ]] || die "push enabled but no remote configured"
+
+  if ! git -C "$MIRROR_REPO" rev-parse --verify HEAD >/dev/null 2>&1; then
+    printf 'no commits to push\n'
+    return 0
+  fi
+
+  git -C "$MIRROR_REPO" push -u origin "$BRANCH"
+}
+
 realpath_portable() {
   local target="$1"
   if command -v realpath >/dev/null 2>&1; then
@@ -204,13 +219,10 @@ rsync "${rsync_args[@]}" "$SOURCE_PATH/" "$MIRROR_REPO/"
 
 if [[ -z "$(git -C "$MIRROR_REPO" status --porcelain)" ]]; then
   printf 'no changes\n'
+  push_if_enabled
   exit 0
 fi
 
 git -C "$MIRROR_REPO" add -A
 git -C "$MIRROR_REPO" commit -m "$MESSAGE_PREFIX: $(date '+%Y-%m-%d %H:%M:%S')"
-
-if [[ "$PUSH" == "1" ]]; then
-  [[ -n "$REMOTE_URL" ]] || die "push enabled but no remote configured"
-  git -C "$MIRROR_REPO" push -u origin "$BRANCH"
-fi
+push_if_enabled

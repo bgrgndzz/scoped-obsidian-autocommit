@@ -69,6 +69,9 @@ bin/scoped-obsidian-autocommit \
 The dry run uses `rsync -n`, so it shows what would be mirrored without changing
 the mirror repo.
 
+Normal runs still try to push when there are no file changes. This lets the tool
+recover from a previous local commit that did not reach the remote.
+
 ## Run once
 
 ```bash
