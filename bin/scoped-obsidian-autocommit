@@ -2,6 +2,8 @@
 set -euo pipefail
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export LANG=C
+export LC_ALL=C
 
 SOURCE_PATH="${SOURCE_PATH:-}"
 MIRROR_REPO="${MIRROR_REPO:-}"
@@ -42,7 +44,7 @@ Options:
   --dry-run                     Show what would sync without changing files
   --no-push                     Commit locally but do not push
   --allow-obsidian-root         Allow source paths containing a .obsidian folder
-  --sync-backend NAME           rsync, git-archive, or auto (default: rsync)
+  --sync-backend NAME           rsync, git-index, git-archive, or auto (default: rsync)
   -h, --help                    Show this help
 
 Config files are trusted shell snippets. Supported variables:
@@ -162,7 +164,7 @@ done
 [[ -n "$SOURCE_PATH" ]] || die "missing --source or SOURCE_PATH"
 [[ -n "$MIRROR_REPO" ]] || die "missing --repo or MIRROR_REPO"
 case "$SYNC_BACKEND" in
-  rsync|git-archive|auto) ;;
+  rsync|git-index|git-archive|auto) ;;
   *) die "unsupported sync backend: $SYNC_BACKEND" ;;
 esac
 
@@ -192,7 +194,9 @@ LOCK_DIR="${TMPDIR:-/tmp}/scoped-obsidian-autocommit.${LOCK_ID}.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   die "another scoped autocommit is already running for this source/repo"
 fi
-trap 'rm -rf "$LOCK_DIR"' EXIT
+GIT_INDEX_TEMP=""
+GIT_EXTRACT_TEMP=""
+trap 'rm -rf "$LOCK_DIR"; [[ -n "$GIT_INDEX_TEMP" ]] && rm -f "$GIT_INDEX_TEMP"; [[ -n "$GIT_EXTRACT_TEMP" ]] && rm -rf "$GIT_EXTRACT_TEMP"' EXIT
 
 rsync_args=(-a --delete)
 for pattern in "${EXCLUDE_PATTERNS[@]}"; do
@@ -248,10 +252,72 @@ sync_with_git_archive() {
   done
 }
 
+sync_with_git_index() {
+  local git_root
+  local source_prefix
+  local pathspec
+  local temp_index
+  local temp_extract
+  local temp_source
+  local tree
+  local pattern
+
+  # Build a temporary Git index containing the current working-tree state for
+  # only this subtree. This avoids touching the private vault's real index while
+  # still working from LaunchAgents that cannot rsync protected folders.
+  cd /
+
+  git_root="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel)" || return 1
+  source_prefix="$(git -C "$SOURCE_PATH" rev-parse --show-prefix)" || return 1
+  source_prefix="${source_prefix%/}"
+  pathspec="${source_prefix:-.}"
+
+  temp_index="$(mktemp "${TMPDIR:-/tmp}/scoped-obsidian-index.XXXXXX")"
+  temp_extract="$(mktemp -d "${TMPDIR:-/tmp}/scoped-obsidian-extract.XXXXXX")"
+  GIT_INDEX_TEMP="$temp_index"
+  GIT_EXTRACT_TEMP="$temp_extract"
+  rm -f "$temp_index"
+
+  if git -C "$git_root" rev-parse --verify HEAD >/dev/null 2>&1; then
+    GIT_INDEX_FILE="$temp_index" git -C "$git_root" read-tree HEAD
+  else
+    GIT_INDEX_FILE="$temp_index" git -C "$git_root" read-tree --empty
+  fi
+
+  GIT_INDEX_FILE="$temp_index" git -C "$git_root" add -A -- "$pathspec"
+  tree="$(GIT_INDEX_FILE="$temp_index" git -C "$git_root" write-tree)"
+
+  find "$MIRROR_REPO" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+
+  if [[ -n "$source_prefix" ]]; then
+    git -C "$git_root" archive "$tree" "$source_prefix" | tar -x -C "$temp_extract"
+    temp_source="$temp_extract/$source_prefix"
+    if [[ -d "$temp_source" ]]; then
+      rsync -a "$temp_source/" "$MIRROR_REPO/"
+    fi
+  else
+    git -C "$git_root" archive "$tree" | tar -x -C "$MIRROR_REPO"
+  fi
+
+  for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    case "$pattern" in
+      */)
+        find "$MIRROR_REPO" -mindepth 2 -name "${pattern%/}" -type d -prune -exec rm -rf {} +
+        ;;
+      .DS_Store|Thumbs.db)
+        find "$MIRROR_REPO" -name "$pattern" -type f -delete
+        ;;
+    esac
+  done
+}
+
 sync_source() {
   case "$SYNC_BACKEND" in
     rsync)
       sync_with_rsync
+      ;;
+    git-index)
+      sync_with_git_index
       ;;
     git-archive)
       sync_with_git_archive
@@ -259,8 +325,8 @@ sync_source() {
     auto)
       sync_with_rsync || {
         local status="$?"
-        printf 'rsync failed with status %s; falling back to git archive\n' "$status" >&2
-        sync_with_git_archive
+        printf 'rsync failed with status %s; falling back to git-index archive\n' "$status" >&2
+        sync_with_git_index
       }
       ;;
   esac
@@ -272,7 +338,7 @@ printf 'branch: %s\n' "$BRANCH"
 
 if [[ "$DRY_RUN" == "1" ]]; then
   printf 'mode: dry-run\n'
-  if [[ "$SYNC_BACKEND" == "git-archive" ]]; then
+  if [[ "$SYNC_BACKEND" == "git-archive" || "$SYNC_BACKEND" == "git-index" ]]; then
     git_root="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel)"
     source_prefix="$(git -C "$SOURCE_PATH" rev-parse --show-prefix)"
     source_prefix="${source_prefix%/}"

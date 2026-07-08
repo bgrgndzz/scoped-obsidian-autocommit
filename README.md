@@ -8,7 +8,7 @@ notes, but one folder should become a shared Git-backed knowledge base.
 
 ## How it works
 
-The tool never runs `git add` in your full vault. Instead it:
+The tool never mutates the Git index in your full vault. Instead it:
 
 1. reads a configured source folder,
 2. mirrors only that folder into a separate local Git repo,
@@ -60,16 +60,22 @@ include private paths or remotes.
 `SYNC_BACKEND` can be:
 
 - `rsync`: mirror the live source folder directly.
+- `git-index`: build a temporary Git index for only the source folder, then
+  mirror that snapshot. This can include uncommitted source-folder changes
+  without committing the full private vault.
 - `git-archive`: mirror the source folder from its containing Git repo's `HEAD`.
-- `auto`: try `rsync` first, then fall back to `git-archive` if macOS privacy
+- `auto`: try `rsync` first, then fall back to `git-index` if macOS privacy
   controls block a LaunchAgent from reading `~/Documents`.
 
-Use `auto` when your source folder lives inside an already-autocommitted vault:
-terminal runs still capture live file changes through `rsync`, while launchd can
-fall back to the committed vault tree when macOS denies direct folder access.
-The `git-archive` backend mirrors committed source state only, so it refuses to
-run when the source subtree has uncommitted changes. This avoids publishing a
-stale snapshot over newer live notes.
+Use `auto` when your source folder lives inside a Git-backed vault: terminal
+runs still capture live file changes through `rsync`, while launchd can fall
+back to a temporary Git-index snapshot when macOS denies direct folder access.
+The `git-index` backend does not commit the private vault and does not stage
+changes in the private vault's real index.
+
+The `git-archive` backend mirrors committed source state only. It refuses to run
+when the source subtree has uncommitted changes, which avoids publishing a stale
+snapshot over newer live notes.
 
 ## Dry run
 
@@ -82,8 +88,9 @@ bin/scoped-obsidian-autocommit \
 ```
 
 The default dry run uses `rsync -n`, so it shows what would be mirrored without
-changing the mirror repo. With `--sync-backend git-archive`, dry run lists the
-files that would be exported from the source repo's `HEAD`.
+changing the mirror repo. With `--sync-backend git-archive` or
+`--sync-backend git-index`, dry run lists the files currently exported from the
+source repo's `HEAD`.
 
 Normal runs still try to push when there are no file changes. This lets the tool
 recover from a previous local commit that did not reach the remote.
@@ -133,7 +140,7 @@ launchctl unload ~/Library/LaunchAgents/com.bourne.ai-research-autocommit.plist
   `--allow-obsidian-root` is passed
 - excludes `.git/`, `.obsidian/`, `.trash/`, `.DS_Store`, and `Thumbs.db`
 - supports repeatable `--exclude` patterns
-- supports a `git-archive` fallback for macOS LaunchAgents that cannot directly
+- supports a `git-index` fallback for macOS LaunchAgents that cannot directly
   read protected folders like `~/Documents`
 - refuses `git-archive` sync when the source subtree is dirty, because Git
   archives cannot include uncommitted edits
